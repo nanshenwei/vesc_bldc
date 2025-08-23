@@ -23,7 +23,7 @@
 #define HW_NAME					"Capstone"
 
 #define HW_MAJOR				1
-#define HW_MINOR				0
+#define HW_MINOR				1
 
 // HW properties
 // #define HW_HAS_DRV8301
@@ -101,16 +101,16 @@
 #define V_REG					3.3
 #endif
 #ifndef VIN_R1
-#define VIN_R1					137000.0
+#define VIN_R1					499000.0
 #endif
 #ifndef VIN_R2
-#define VIN_R2					1000.0
+#define VIN_R2					3600.0
 #endif
 #ifndef CURRENT_AMP_GAIN
 #define CURRENT_AMP_GAIN		20.0
 #endif
 #ifndef CURRENT_SHUNT_RES
-#define CURRENT_SHUNT_RES		0.007
+#define CURRENT_SHUNT_RES		0.008
 #endif
 
 // Input voltage
