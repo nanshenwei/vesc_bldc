@@ -379,8 +379,10 @@ void foc_svm(float alpha, float beta, uint32_t PWMFullDutyCycle,
 void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *motor) {
 	mc_configuration *conf_now = motor->m_conf;
 
-	float angle_now = motor->m_pos_pid_now;
-	float angle_set = motor->m_pos_pid_set;
+	// 读取原始角（通常 0..360）
+	float angle_now_raw = motor->m_pos_pid_now;
+	// 读取原始指令（上层CAN SET_POS）
+	float angle_set_raw = motor->m_pos_pid_set;
 
 	float p_term;
 	float d_term;
@@ -390,14 +392,57 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 	if (motor->m_control_mode != CONTROL_MODE_POS) {
 		motor->m_pos_i_term = 0;
 		motor->m_pos_prev_error = 0;
-		motor->m_pos_prev_proc = angle_now;
+		motor->m_pos_prev_proc = angle_now_raw;
 		motor->m_pos_d_filter = 0.0;
 		motor->m_pos_d_filter_proc = 0.0;
+		motor->m_pos_cont_inited = false;	// 退出或未使能位置环时，重置连续角初始化标志
 		return;
+	}
+	
+	float angle_set_norm = angle_set_raw;
+	utils_norm_angle(&angle_set_norm);
+
+	// ===== 连续角更新 =====
+	if (!motor->m_pos_cont_inited) {
+		// 首次进入：用当前角初始化连续角与目标角
+		motor->m_pos_now_cont     = angle_now_raw;
+		motor->m_pos_set_cont     = angle_set_norm;
+		motor->m_pos_set_last_mod = angle_set_norm;
+		motor->m_pos_prev_raw     = angle_now_raw;
+		motor->m_pos_prev_proc    = motor->m_pos_now_cont; // 将 prev_proc 也放在连续角坐标系
+		motor->m_pos_cont_inited  = true;
+		motor->m_pos_dt_int       = 0.0f;
+		motor->m_pos_dt_int_proc  = 0.0f;
+		motor->m_pos_prev_error   = 0.0f;
+		motor->m_pos_limit_min_deg = -__FLT_MAX__;
+		motor->m_pos_limit_max_deg = __FLT_MAX__;
+	} else {
+		// 1) 用“最短路”只计算测量角的增量，再累加成连续角（就是计算角度变化量，含跨零处理，跨零成立条件是这里执行频率足够高 1000Hz情况下，2ms机械角度（如果有减速器的则是减速后）旋转一圈以上则失效）
+		// 减速比100，1000Hz频率，电机（减速前）机械转速3,000,000rpm时失效
+		//    防止 359 -> 1 产生 +2 而不是 -358
+		// float dnow = utils_angle_difference(angle_now, (float)(motor->m_pos_prev_proc)); // prev_proc 已是连续角对应的“前一刻角”，但这里需要上一刻的原始角。
+		// 注意：若想更严格，可另存一份“上一刻原始角”⬇️，这里⬆️复用 prev_proc。假设 m_pos_prev_proc 上一次用 angle_now 赋值过（首次已做），可正常工作
+		float dnow = utils_angle_difference(angle_now_raw, motor->m_pos_prev_raw);
+		motor->m_pos_now_cont += dnow;
+	}
+	// 2) 连续目标角更新：按上层命令的“原始”增量直接累加，不 wrap
+	// （可选）去抖/死区：若变化小于阈值则忽略本帧（避免小抖导致目标漂移）
+	// float delta_cmd = angle_set_norm - motor->m_pos_set_last_mod;
+	// if (fabsf(delta_cmd) >= POS_CMD_DEADBAND_DEG) {
+	if (angle_set_norm != motor->m_pos_set_last_mod) {
+		motor->m_pos_set_cont     += (angle_set_norm - motor->m_pos_set_last_mod);
+		motor->m_pos_set_last_mod  = angle_set_norm;
+	}
+
+	// 3) 可选：目标角软限位（避免机械臂超范围）
+	if (motor->m_pos_limit_min_deg < motor->m_pos_limit_max_deg) {
+		utils_truncate_number(&motor->m_pos_set_cont,
+							  motor->m_pos_limit_min_deg,
+							  motor->m_pos_limit_max_deg);
 	}
 
 	// Compute parameters
-	float error = utils_angle_difference(angle_set, angle_now);
+	float error = motor->m_pos_set_cont - motor->m_pos_now_cont;
 	float error_sign = 1.0;
 
 	if (conf_now->m_sensor_port_mode != SENSOR_PORT_MODE_HALL) {
@@ -445,12 +490,13 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 	UTILS_LP_FAST(motor->m_pos_d_filter, d_term, conf_now->p_pid_kd_filter);
 	d_term = motor->m_pos_d_filter;
 
-	// Process D term
+	// Process D term（基于连续角的过程导数）
 	motor->m_pos_dt_int_proc += dt;
-	if (angle_now == motor->m_pos_prev_proc) {
+	float dproc = motor->m_pos_now_cont - motor->m_pos_prev_proc; // 连续角增量
+	if (dproc == 0.0f) {
 		d_term_proc = 0.0;
 	} else {
-		d_term_proc = -utils_angle_difference(angle_now, motor->m_pos_prev_proc) * error_sign * (kd_proc / motor->m_pos_dt_int_proc);
+		d_term_proc = -(dproc) * error_sign * (kd_proc / motor->m_pos_dt_int_proc);
 		motor->m_pos_dt_int_proc = 0.0;
 	}
 
@@ -463,9 +509,10 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 	utils_truncate_number_abs(&p_tmp, 1.0);
 	utils_truncate_number_abs((float*)&motor->m_pos_i_term, 1.0 - fabsf(p_tmp));
 
-	// Store previous error
+	// Store previous error（基于连续角）
 	motor->m_pos_prev_error = error;
-	motor->m_pos_prev_proc = angle_now;
+	motor->m_pos_prev_proc  = motor->m_pos_now_cont;
+	motor->m_pos_prev_raw   = angle_now_raw;
 
 	// Calculate output
 	float output = p_term + motor->m_pos_i_term + d_term + d_term_proc;

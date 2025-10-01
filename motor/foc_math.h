@@ -239,6 +239,16 @@ typedef struct {
 	float p_ld;
 	float p_inv_ld_lq; // (1.0/lq - 1.0/ld)
 	float p_v2_v3_inv_avg_half; // (0.5/ld + 0.5/lq)
+
+	// ===== Added for continuous-angle position control =====
+    bool  m_pos_cont_inited;     // 是否已初始化连续角
+    float m_pos_now_cont;        // 连续实际角（deg, 可多圈）
+    float m_pos_set_cont;        // 连续目标角（deg, 可多圈）
+    float m_pos_set_last_mod;    // 上次收到的“原始目标角”（deg, 0..360 或你的上层格式）
+    // 可选：若需要软限位，可在外部初始化下两项；不需要可忽略或设为极值
+    float m_pos_limit_min_deg;   // 软限位下限（deg, 连续角坐标系）
+    float m_pos_limit_max_deg;   // 软限位上限（deg, 连续角坐标系）
+	float m_pos_prev_raw;
 } motor_all_state_t;
 
 // Functions
