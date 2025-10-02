@@ -1564,6 +1564,15 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 			timeout_reset();
 			break;
 
+		case CAN_PACKET_SET_POS_LIM:
+			ind = 0;
+			float pos = buffer_get_float32(data8, 1e6, &ind);
+			float max_vel = buffer_get_float16(data8, 100, &ind);
+			float max_accel = buffer_get_float16(data8, 10, &ind);
+			mc_interface_set_pid_pos_with_limits(pos, max_vel, max_accel);
+			timeout_reset();
+			break;
+
 		case CAN_PACKET_FILL_RX_BUFFER: {
 			int buf_ind = -1;
 			int offset = data8[0];

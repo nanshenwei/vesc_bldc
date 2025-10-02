@@ -249,6 +249,12 @@ typedef struct {
     float m_pos_limit_min_deg;   // 软限位下限（deg, 连续角坐标系）
     float m_pos_limit_max_deg;   // 软限位上限（deg, 连续角坐标系）
 	float m_pos_prev_raw;
+	// 位置环运动规划器状态
+	float m_pos_set_cont_prof; // 梯形限速后的“规划目标角”（deg，连续角坐标）
+	float m_pos_prof_vel;      // 规划器当前速度（deg/s）
+	// 位置环速度/加速度限幅（单位：deg/s 与 deg/s^2）
+	float p_pid_max_speed_deg_s;   // 最大角速度，<=0 表示禁用限速
+	float p_pid_max_acc_deg_s2;    // 最大角加速度，<=0 表示禁用限速
 } motor_all_state_t;
 
 // Functions

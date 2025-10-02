@@ -416,6 +416,9 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 		motor->m_pos_prev_error   = 0.0f;
 		motor->m_pos_limit_min_deg = -__FLT_MAX__;
 		motor->m_pos_limit_max_deg = __FLT_MAX__;
+        // 初始化运动规划器（从当前位置静止起步）
+        motor->m_pos_set_cont_prof = motor->m_pos_now_cont;
+        motor->m_pos_prof_vel = 0.0f;
 	} else {
 		// 1) 用“最短路”只计算测量角的增量，再累加成连续角（就是计算角度变化量，含跨零处理，跨零成立条件是这里执行频率足够高 1000Hz情况下，2ms机械角度（如果有减速器的则是减速后）旋转一圈以上则失效）
 		// 减速比100，1000Hz频率，电机（减速前）机械转速3,000,000rpm时失效
@@ -441,8 +444,57 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 							  motor->m_pos_limit_max_deg);
 	}
 
+    // 4) 梯形速度规划（最大速度/加速度）
+    float max_vel = motor->p_pid_max_speed_deg_s;   // deg/s
+    float max_acc = motor->p_pid_max_acc_deg_s2;    // deg/s^2
+    if (max_vel > 0.0f && max_acc > 0.0f) {
+        // 以 m_pos_set_cont 为最终目标，生成限速后的“规划目标角” m_pos_set_cont_prof
+        float delta = motor->m_pos_set_cont - motor->m_pos_set_cont_prof; // 剩余距离
+        float sign  = (delta > 0.0f) - (delta < 0.0f);                    // sgn(delta)
+        float v     = motor->m_pos_prof_vel;
+        float v_abs = fabsf(v);
+        float d_brake = (v_abs * v_abs) / (2.0f * max_acc);               // 刹车距离
+
+        float a_cmd = 0.0f;
+        if (sign == 0.0f) {
+            // 已到目标
+            v = 0.0f;
+            motor->m_pos_set_cont_prof = motor->m_pos_set_cont;
+        } else {
+            // 速度方向与剩余目标方向可能不一致，优先减速
+            if (fabsf(delta) <= d_brake) {
+                a_cmd = -max_acc * ((v > 0.0f) - (v < 0.0f)); // 反向最大减速
+            } else {
+                a_cmd = max_acc * sign;                        // 朝目标方向加速
+            }
+
+            // 速度积分并限幅
+            v += a_cmd * dt;
+            if (fabsf(v) > max_vel) {
+                v = max_vel * ((v > 0.0f) - (v < 0.0f));
+            }
+
+            // 位置积分，并防止跨越目标（overshoot）
+            float new_prof = motor->m_pos_set_cont_prof + v * dt;
+            if ((sign > 0.0f && new_prof > motor->m_pos_set_cont) ||
+                (sign < 0.0f && new_prof < motor->m_pos_set_cont)) {
+                new_prof = motor->m_pos_set_cont;
+                v = 0.0f;
+            }
+
+            motor->m_pos_set_cont_prof = new_prof;
+        }
+
+        motor->m_pos_prof_vel = v;
+    } else {
+        // 未设置限速或配置为0：直接跟踪最终目标
+        motor->m_pos_set_cont_prof = motor->m_pos_set_cont;
+        // 可选：将规划速度置0
+        motor->m_pos_prof_vel = 0.0f;
+    }
+
 	// Compute parameters
-	float error = motor->m_pos_set_cont - motor->m_pos_now_cont;
+	float error = motor->m_pos_set_cont_prof - motor->m_pos_now_cont;
 	float error_sign = 1.0;
 
 	if (conf_now->m_sensor_port_mode != SENSOR_PORT_MODE_HALL) {

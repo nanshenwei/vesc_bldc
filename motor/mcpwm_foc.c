@@ -779,6 +779,20 @@ void mcpwm_foc_set_pid_speed(float rpm) {
 void mcpwm_foc_set_pid_pos(float pos) {
 	get_motor_now()->m_control_mode = CONTROL_MODE_POS;
 	get_motor_now()->m_pos_pid_set = pos;
+	get_motor_now()->p_pid_max_speed_deg_s = 0.0f;
+	get_motor_now()->p_pid_max_acc_deg_s2 = 0.0f;
+
+	if (get_motor_now()->m_state != MC_STATE_RUNNING) {
+		get_motor_now()->m_motor_released = false;
+		get_motor_now()->m_state = MC_STATE_RUNNING;
+	}
+}
+
+void mcpwm_foc_set_pid_pos_with_limits(float pos, float max_vel, float max_acc) {
+	get_motor_now()->m_control_mode = CONTROL_MODE_POS;
+	get_motor_now()->m_pos_pid_set = pos;
+	get_motor_now()->p_pid_max_speed_deg_s = max_vel;
+	get_motor_now()->p_pid_max_acc_deg_s2 = max_acc;
 
 	if (get_motor_now()->m_state != MC_STATE_RUNNING) {
 		get_motor_now()->m_motor_released = false;
