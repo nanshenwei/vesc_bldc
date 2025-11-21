@@ -389,25 +389,22 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 	float d_term_proc;
 
 	// PID is off. Return.
-	if (motor->m_control_mode != CONTROL_MODE_POS) {
-		motor->m_pos_i_term = 0;
-		motor->m_pos_prev_error = 0;
+	if (motor->m_control_mode != CONTROL_MODE_POS || dt <= 1e-7f) {
+		motor->m_pos_i_term = 0.0f;
+		motor->m_pos_prev_error = 0.0f;
 		motor->m_pos_prev_proc = angle_now_raw;
-		motor->m_pos_d_filter = 0.0;
-		motor->m_pos_d_filter_proc = 0.0;
+		motor->m_pos_d_filter = 0.0f;
+		motor->m_pos_d_filter_proc = 0.0f; // 下面将作为速度LPF状态使用
 		motor->m_pos_cont_inited = false;	// 退出或未使能位置环时，重置连续角初始化标志
 		return;
 	}
-	
-	float angle_set_norm = angle_set_raw;
-	utils_norm_angle(&angle_set_norm);
 
 	// ===== 连续角更新 =====
 	if (!motor->m_pos_cont_inited) {
 		// 首次进入：用当前角初始化连续角与目标角
 		motor->m_pos_now_cont     = angle_now_raw;
-		motor->m_pos_set_cont     = angle_set_norm;
-		motor->m_pos_set_last_mod = angle_set_norm;
+		motor->m_pos_set_cont     = angle_set_raw;
+		motor->m_pos_set_last_mod = angle_set_raw;
 		motor->m_pos_prev_raw     = angle_now_raw;
 		motor->m_pos_prev_proc    = motor->m_pos_now_cont; // 将 prev_proc 也放在连续角坐标系
 		motor->m_pos_cont_inited  = true;
@@ -416,9 +413,9 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 		motor->m_pos_prev_error   = 0.0f;
 		motor->m_pos_limit_min_deg = -__FLT_MAX__;
 		motor->m_pos_limit_max_deg = __FLT_MAX__;
-        // 初始化运动规划器（从当前位置静止起步）
-        motor->m_pos_set_cont_prof = motor->m_pos_now_cont;
-        motor->m_pos_prof_vel = 0.0f;
+		// 初始化运动规划器（从当前位置静止起步）
+		motor->m_pos_set_cont_prof = motor->m_pos_now_cont;
+		motor->m_pos_prof_vel = 0.0f;
 	} else {
 		// 1) 用“最短路”只计算测量角的增量，再累加成连续角（就是计算角度变化量，含跨零处理，跨零成立条件是这里执行频率足够高 1000Hz情况下，2ms机械角度（如果有减速器的则是减速后）旋转一圈以上则失效）
 		// 减速比100，1000Hz频率，电机（减速前）机械转速3,000,000rpm时失效
@@ -428,13 +425,17 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 		float dnow = utils_angle_difference(angle_now_raw, motor->m_pos_prev_raw);
 		motor->m_pos_now_cont += dnow;
 	}
+
+	// 抵消接口层加过的 offset，再还原回原始坐标系
+	float angle_set_unoff = angle_set_raw - conf_now->p_pid_offset;
+	utils_norm_angle(&angle_set_unoff);
+
+	angle_set_unoff += conf_now->p_pid_offset; // 还原回原始坐标系
+
 	// 2) 连续目标角更新：按上层命令的“原始”增量直接累加，不 wrap
-	// （可选）去抖/死区：若变化小于阈值则忽略本帧（避免小抖导致目标漂移）
-	// float delta_cmd = angle_set_norm - motor->m_pos_set_last_mod;
-	// if (fabsf(delta_cmd) >= POS_CMD_DEADBAND_DEG) {
-	if (angle_set_norm != motor->m_pos_set_last_mod) {
-		motor->m_pos_set_cont     += (angle_set_norm - motor->m_pos_set_last_mod);
-		motor->m_pos_set_last_mod  = angle_set_norm;
+	if (angle_set_unoff != motor->m_pos_set_last_mod) {
+		motor->m_pos_set_cont     += (angle_set_unoff - motor->m_pos_set_last_mod);
+		motor->m_pos_set_last_mod  = angle_set_unoff;
 	}
 
 	// 3) 可选：目标角软限位（避免机械臂超范围）
@@ -444,75 +445,80 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 							  motor->m_pos_limit_max_deg);
 	}
 
-    // 4) 梯形速度规划（最大速度/加速度）
-    float max_vel = motor->p_pid_max_speed_deg_s;   // deg/s
-    float max_acc = motor->p_pid_max_acc_deg_s2;    // deg/s^2
-    if (max_vel > 0.0f && max_acc > 0.0f) {
-        // 以 m_pos_set_cont 为最终目标，生成限速后的“规划目标角” m_pos_set_cont_prof
-        float delta = motor->m_pos_set_cont - motor->m_pos_set_cont_prof; // 剩余距离
-        float sign  = (delta > 0.0f) - (delta < 0.0f);                    // sgn(delta)
-        float v     = motor->m_pos_prof_vel;
-        float v_abs = fabsf(v);
-        float d_brake = (v_abs * v_abs) / (2.0f * max_acc);               // 刹车距离
+	// 4) 梯形速度规划（最大速度/加速度）
+	float max_vel = motor->p_pid_max_speed_deg_s;   // deg/s
+	float max_acc = motor->p_pid_max_acc_deg_s2;    // deg/s^2
+	if (max_vel > 0.0f && max_acc > 0.0f) {
+		// 以 m_pos_set_cont 为最终目标，生成限速后的“规划目标角” m_pos_set_cont_prof
+		float delta = motor->m_pos_set_cont - motor->m_pos_set_cont_prof; // 剩余距离
+		float sign  = (delta > 0.0f) - (delta < 0.0f);                    // sgn(delta)
+		float v     = motor->m_pos_prof_vel;
+		// float v_abs = fabsf(v);
+		// float d_brake = (v_abs * v_abs) / (2.0f * max_acc);               // 刹车所需距离
 
-        float a_cmd = 0.0f;
-        if (sign == 0.0f) {
-            // 已到目标
-            v = 0.0f;
-            motor->m_pos_set_cont_prof = motor->m_pos_set_cont;
-        } else {
-            // 速度方向与剩余目标方向可能不一致，优先减速
-            if (fabsf(delta) <= d_brake) {
-                a_cmd = -max_acc * ((v > 0.0f) - (v < 0.0f)); // 反向最大减速
-            } else {
-                a_cmd = max_acc * sign;                        // 朝目标方向加速
-            }
+		float a_cmd = 0.0f;
 
-            // 速度积分并限幅
-            v += a_cmd * dt;
-            if (fabsf(v) > max_vel) {
-                v = max_vel * ((v > 0.0f) - (v < 0.0f));
-            }
+		// 用“v_des 跟踪 + 加速度限幅”的连续实现，去掉显式加/刹分支与 v_max_allowed 的硬截断，降低拐点处跃度
+		// 目标速度：方向 = sgn(delta)，大小 = min(v_max, sqrt(2*a*|delta|))
+		float v_brake_allow = sqrtf(fmaxf(0.0f, 2.0f * max_acc * fabsf(delta)));
+		float v_des = sign * fminf(max_vel, v_brake_allow);
 
-            // 位置积分，并防止跨越目标（overshoot）
-            float new_prof = motor->m_pos_set_cont_prof + v * dt;
-            if ((sign > 0.0f && new_prof > motor->m_pos_set_cont) ||
-                (sign < 0.0f && new_prof < motor->m_pos_set_cont)) {
-                new_prof = motor->m_pos_set_cont;
-                v = 0.0f;
-            }
+		// 加速度限幅地逼近 v_des（保证速度连续）
+		a_cmd = (v_des - v) / dt;
+		if (a_cmd >  max_acc) a_cmd =  max_acc;
+		if (a_cmd < -max_acc) a_cmd = -max_acc;
 
-            motor->m_pos_set_cont_prof = new_prof;
-        }
+		// 速度积分并限幅（再次保护）
+		v += a_cmd * dt;
+		if (fabsf(v) > max_vel) {
+			v = max_vel * ((v > 0.0f) - (v < 0.0f));
+		}
 
-        motor->m_pos_prof_vel = v;
-    } else {
-        // 未设置限速或配置为0：直接跟踪最终目标
-        motor->m_pos_set_cont_prof = motor->m_pos_set_cont;
-        // 可选：将规划速度置0
-        motor->m_pos_prof_vel = 0.0f;
-    }
+		// 位置积分（轨迹连续）
+		float new_prof = motor->m_pos_set_cont_prof + v * dt;
+
+		// 越目标保护，避免积分跨越目标导致回拉
+		float delta_next = motor->m_pos_set_cont - new_prof;
+		if ((delta > 0.0f && delta_next < 0.0f) || (delta < 0.0f && delta_next > 0.0f)) {
+			new_prof = motor->m_pos_set_cont;
+			v = 0.0f;
+			a_cmd = 0.0f;
+		}
+
+		motor->m_pos_set_cont_prof = new_prof;
+		motor->m_pos_prof_vel = v;
+
+		// 将 a_cmd 暂存到 dt 积分通道，供下方 I 冻结判据参考（不改变原有变量语义）
+		motor->m_pos_dt_int_proc = a_cmd; // 复用空闲存储位；若有独立状态更好
+	} else {
+		// 未设置限速或配置为0：直接跟踪最终目标
+		motor->m_pos_set_cont_prof = motor->m_pos_set_cont;
+		// 可选：将规划速度置0
+		motor->m_pos_prof_vel = 0.0f;
+	}
 
 	// Compute parameters
 	float error = motor->m_pos_set_cont_prof - motor->m_pos_now_cont;
-	float error_sign = 1.0;
+	float error_sign = 1.0f;
 
 	if (conf_now->m_sensor_port_mode != SENSOR_PORT_MODE_HALL) {
 		if (conf_now->foc_encoder_inverted) {
-			error_sign = -1.0;
+			error_sign = -1.0f;
 		}
 	}
 
+	// 将误差、设定速度与测量速度统一到同一符号约定
 	error *= error_sign;
+	float v_set = motor->m_pos_prof_vel * error_sign;
 
 	float kp = conf_now->p_pid_kp;
 	float ki = conf_now->p_pid_ki;
 	float kd = conf_now->p_pid_kd;
 	float kd_proc = conf_now->p_pid_kd_proc;
 
-	if (conf_now->p_pid_gain_dec_angle > 0.1) {
+	if (conf_now->p_pid_gain_dec_angle > 0.1f) {
 		float min_error = conf_now->p_pid_gain_dec_angle / conf_now->p_pid_ang_div;
-		float error_abs = fabs(error);
+		float error_abs = fabsf(error);
 
 		if (error_abs < min_error) {
 			float scale = error_abs / min_error;
@@ -523,62 +529,63 @@ void foc_run_pid_control_pos(bool index_found, float dt, motor_all_state_t *moto
 		}
 	}
 
+	// P 与 I
 	p_term = error * kp;
-	motor->m_pos_i_term += error * (ki * dt);
-
-	// Average DT for the D term when the error does not change. This likely
-	// happens at low speed when the position resolution is low and several
-	// control iterations run without position updates.
-	// TODO: Are there problems with this approach?
-	motor->m_pos_dt_int += dt;
-	if (error == motor->m_pos_prev_error) {
-		d_term = 0.0;
-	} else {
-		d_term = (error - motor->m_pos_prev_error) * (kd / motor->m_pos_dt_int);
-		motor->m_pos_dt_int = 0.0;
+	// 可选的I冻结：高速/大误差时减弱I以避免D尖峰叠加反冲（保持原有风up保护前照旧积分）
+	// 根据加速度/速度门限实际冻结 I，收尾段自动恢复
+	bool i_freeze = false;
+	if (max_vel > 0.0f && max_acc > 0.0f) {
+		float a_cmd_ref = motor->m_pos_dt_int_proc; // 上文保存的加速度指令
+		if (fabsf(a_cmd_ref) > 0.5f * max_acc || fabsf(v_set) > 0.5f * max_vel) {
+			i_freeze = true;
+		}
+	}
+	if (!i_freeze) {
+		motor->m_pos_i_term += error * (ki * dt);
 	}
 
-	// Filter D
-	UTILS_LP_FAST(motor->m_pos_d_filter, d_term, conf_now->p_pid_kd_filter);
+	// 统一的速度估计与D实现（消除“误差不变才清dt”的门控带来的相位问题）
+	// v_raw = dtheta/dt（连续角），再做同一LPF得到 v_meas_f
+	float dtheta = motor->m_pos_now_cont - motor->m_pos_prev_proc; // 连续角增量
+	float v_raw = (dtheta / dt) * error_sign;
+
+	// 用 m_pos_d_filter_proc 作为速度LPF的状态存储，避免再做二次滤波
+	float v_meas_f = motor->m_pos_d_filter_proc; // reuse 作为速度LPF状态
+	UTILS_LP_FAST(v_meas_f, v_raw, conf_now->p_pid_kd_filter);
+	motor->m_pos_d_filter_proc = v_meas_f;
+
+	// D(process)：仅对测量速度，提供阻尼
+	d_term_proc = -kd_proc * v_meas_f;
+
+	// D(error)：用 v_set - v_meas_f，避免把设定位置的阶跃直接微分（等效速度误差D）
+	float v_err = v_set - v_meas_f;
+	float d_unfilt = kd * v_err;
+	UTILS_LP_FAST(motor->m_pos_d_filter, d_unfilt, conf_now->p_pid_kd_filter);
 	d_term = motor->m_pos_d_filter;
 
-	// Process D term（基于连续角的过程导数）
-	motor->m_pos_dt_int_proc += dt;
-	float dproc = motor->m_pos_now_cont - motor->m_pos_prev_proc; // 连续角增量
-	if (dproc == 0.0f) {
-		d_term_proc = 0.0;
-	} else {
-		d_term_proc = -(dproc) * error_sign * (kd_proc / motor->m_pos_dt_int_proc);
-		motor->m_pos_dt_int_proc = 0.0;
-	}
-
-	// Filter D process
-	UTILS_LP_FAST(motor->m_pos_d_filter_proc, d_term_proc, conf_now->p_pid_kd_filter);
-	d_term_proc = motor->m_pos_d_filter_proc;
-
-	// I-term wind-up protection
+	// I-term wind-up protection（保持原逻辑）
 	float p_tmp = p_term;
-	utils_truncate_number_abs(&p_tmp, 1.0);
-	utils_truncate_number_abs((float*)&motor->m_pos_i_term, 1.0 - fabsf(p_tmp));
+	utils_truncate_number_abs(&p_tmp, 1.0f);
+	utils_truncate_number_abs((float*)&motor->m_pos_i_term, 1.0f - fabsf(p_tmp));
 
-	// Store previous error（基于连续角）
+	// Store previous（基于连续角）
 	motor->m_pos_prev_error = error;
 	motor->m_pos_prev_proc  = motor->m_pos_now_cont;
 	motor->m_pos_prev_raw   = angle_now_raw;
 
 	// Calculate output
 	float output = p_term + motor->m_pos_i_term + d_term + d_term_proc;
-	utils_truncate_number(&output, -1.0, 1.0);
+	utils_truncate_number(&output, -1.0f, 1.0f);
 
 	if (conf_now->m_sensor_port_mode != SENSOR_PORT_MODE_HALL) {
 		if (index_found) {
-			motor->m_iq_set = output * conf_now->l_current_max * conf_now->l_current_max_scale;;
+			motor->m_iq_set = output * conf_now->l_current_max * conf_now->l_current_max_scale;
 		} else {
 			// Rotate the motor with 40 % power until the encoder index is found.
-			motor->m_iq_set = 0.4 * conf_now->l_current_max * conf_now->l_current_max_scale;;
+			motor->m_iq_set = 0.4f * conf_now->l_current_max * conf_now->l_current_max_scale;
 		}
 	} else {
-		motor->m_iq_set = output * conf_now->l_current_max * conf_now->l_current_max_scale;;
+		motor->m_iq_set = output * conf_now->l_current_max * conf_now->l_current_max_scale;
 	}
 }
 

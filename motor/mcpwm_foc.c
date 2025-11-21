@@ -788,6 +788,10 @@ void mcpwm_foc_set_pid_pos(float pos) {
 	}
 }
 
+void mcpwm_foc_set_pid_pos_cont_reset(void) {
+	get_motor_now()->m_pos_cont_inited = false;
+}
+
 void mcpwm_foc_set_pid_pos_with_limits(float pos, float max_vel, float max_acc) {
 	get_motor_now()->m_control_mode = CONTROL_MODE_POS;
 	get_motor_now()->m_pos_pid_set = pos;

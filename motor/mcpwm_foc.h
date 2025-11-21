@@ -38,6 +38,7 @@ void mcpwm_foc_set_duty(float dutyCycle);
 void mcpwm_foc_set_duty_noramp(float dutyCycle);
 void mcpwm_foc_set_pid_speed(float rpm);
 void mcpwm_foc_set_pid_pos(float pos);
+void mcpwm_foc_set_pid_pos_cont_reset(void);
 void mcpwm_foc_set_pid_pos_with_limits(float pos, float max_vel, float max_acc);
 void mcpwm_foc_set_current(float current);
 void mcpwm_foc_release_motor(void);
