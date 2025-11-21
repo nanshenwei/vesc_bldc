@@ -182,6 +182,8 @@ typedef struct {
 	mutex_t mutex;
 } spi_bb_state;
  */
+#define AS504x_MOSI_GPIO		GPIOA
+#define AS504x_MOSI_PIN			7
 #define HW_HALL_ENC_GPIO1		GPIOA
 #define HW_HALL_ENC_PIN1		5
 #define HW_HALL_ENC_GPIO2		GPIOA
